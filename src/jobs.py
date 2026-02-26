@@ -12,8 +12,10 @@ from src.scraper import (
 _jobs = {}
 _lock = threading.Lock()
 
-WORKERS = 10
-REQUEST_DELAY = 0.3  # seconds between batches to avoid GitHub rate limits
+WORKERS = 5
+PAGE_DELAY = 1.0  # seconds between page requests to avoid GitHub blocks
+BATCH_DELAY = 2.0  # seconds between profile batches
+EMPTY_PAGE_LIMIT = 3  # stop after this many consecutive empty pages
 
 
 def create_job(repo_url, mode="full"):
@@ -125,36 +127,39 @@ def _email_only(username):
 
 
 def _scrape_usernames_with_progress(job_id, repo_url):
-    """Scrape all stargazer usernames with progress updates."""
+    """Scrape all stargazer usernames by iterating through page numbers."""
     import requests
     from bs4 import BeautifulSoup
 
     usernames = []
-    stargazer_link = repo_url + "/stargazers"
-    page = 0
+    page = 1
+    empty_streak = 0
 
-    while stargazer_link is not None:
-        stargazer_html = requests.get(stargazer_link).text
+    while True:
+        url = repo_url + "/stargazers?page={}".format(page)
+        stargazer_html = requests.get(url, timeout=15).text
         soup = BeautifulSoup(stargazer_html, "lxml")
 
+        found = []
         truncate_spans = soup.findAll("span", {"class": "Truncate-text"})
         for span in truncate_spans:
             a_tag = span.find("a", {"data-hovercard-type": "user"})
             if a_tag:
                 href = a_tag.get("href")
                 if href:
-                    usernames.append(href.lstrip("/"))
+                    found.append(href.lstrip("/"))
 
-        pagination = soup.find("div", {"class": "pagination"})
-        stargazer_link = None
-        if pagination:
-            next_link = pagination.find("a", string="Next")
-            if next_link:
-                stargazer_link = next_link.get("href")
+        if found:
+            usernames.extend(found)
+            empty_streak = 0
+        else:
+            empty_streak += 1
+            if empty_streak >= EMPTY_PAGE_LIMIT:
+                break
 
         page += 1
         _update_job(job_id, usernames_scraped=len(usernames))
-        time.sleep(REQUEST_DELAY)
+        time.sleep(PAGE_DELAY)
 
     return usernames
 
@@ -177,4 +182,4 @@ def _scrape_profiles_concurrent(job_id, usernames, scrape_fn):
                     results.append({"username": username, "error": "Failed to scrape"})
 
         _append_results(job_id, results)
-        time.sleep(REQUEST_DELAY)
+        time.sleep(BATCH_DELAY)

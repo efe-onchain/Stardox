@@ -39,28 +39,35 @@ def get_repo_title(html):
 
 
 def get_stargazer_usernames(repo_url):
+    import time
     usernames = []
-    stargazer_link = repo_url + "/stargazers"
-    while stargazer_link is not None:
-        stargazer_html = requests.get(stargazer_link).text
+    page = 1
+    empty_streak = 0
+
+    while True:
+        url = repo_url + "/stargazers?page={}".format(page)
+        stargazer_html = requests.get(url, timeout=15).text
         soup = BeautifulSoup(stargazer_html, "lxml")
 
-        # Extract usernames from hovercard user links inside Truncate-text spans
+        found = []
         truncate_spans = soup.findAll("span", {"class": "Truncate-text"})
         for span in truncate_spans:
             a_tag = span.find("a", {"data-hovercard-type": "user"})
             if a_tag:
-                username = a_tag.get("href")
-                if username:
-                    usernames.append(username.lstrip("/"))
+                href = a_tag.get("href")
+                if href:
+                    found.append(href.lstrip("/"))
 
-        # Handle pagination
-        pagination = soup.find("div", {"class": "pagination"})
-        stargazer_link = None
-        if pagination:
-            next_link = pagination.find("a", string="Next")
-            if next_link:
-                stargazer_link = next_link.get("href")
+        if found:
+            usernames.extend(found)
+            empty_streak = 0
+        else:
+            empty_streak += 1
+            if empty_streak >= 3:
+                break
+
+        page += 1
+        time.sleep(1.0)
 
     return usernames
 
