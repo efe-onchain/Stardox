@@ -69,9 +69,6 @@ def download_csv(job_id: str):
     job = get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    if job["status"] != "completed":
-        raise HTTPException(status_code=400, detail="Job not completed yet. Status: " + job["status"])
-
     stargazers = job["stargazers"]
     if not stargazers:
         raise HTTPException(status_code=400, detail="No results")
