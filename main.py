@@ -1,4 +1,7 @@
+import io
+import csv
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from src.jobs import create_job, get_job, list_jobs
 
@@ -58,6 +61,33 @@ def get_scrape_status(
         "limit": limit,
         "stargazers": stargazers,
     }
+
+
+@app.get("/api/stardox/{job_id}/csv")
+def download_csv(job_id: str):
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job["status"] != "completed":
+        raise HTTPException(status_code=400, detail="Job not completed yet. Status: " + job["status"])
+
+    stargazers = job["stargazers"]
+    if not stargazers:
+        raise HTTPException(status_code=400, detail="No results")
+
+    output = io.StringIO()
+    fields = list(stargazers[0].keys())
+    writer = csv.DictWriter(output, fieldnames=fields)
+    writer.writeheader()
+    writer.writerows(stargazers)
+
+    output.seek(0)
+    filename = "{}_stargazers.csv".format(job["repo_name"] or "stardox")
+    return StreamingResponse(
+        output,
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename={}".format(filename)},
+    )
 
 
 @app.get("/api/jobs")
