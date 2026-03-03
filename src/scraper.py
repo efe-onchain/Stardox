@@ -6,6 +6,31 @@ class ScraperError(Exception):
     pass
 
 
+# Session configuration
+SESSION_KEY = "3TNA6kHk3lknT219MNy2TfAGCiGzwPCb-RvVRROahOMsasD3"
+MIN_REPOSITORIES = 20
+
+
+def get_session():
+    """Create a requests session with authentication."""
+    session = requests.Session()
+    session.cookies.set("user_session", SESSION_KEY, domain="github.com")
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+    })
+    return session
+
+
+_session = None
+
+
+def get_authenticated_session():
+    global _session
+    if _session is None:
+        _session = get_session()
+    return _session
+
+
 def format_url(url):
     if url.startswith('http://'):
         url = url.replace('http', 'https')
@@ -74,10 +99,12 @@ def get_stargazer_usernames(repo_url):
 
 def get_latest_commit_email(repo_name, username):
     email = ""
-    commit_data = requests.get(
+    session = get_authenticated_session()
+    commit_data = session.get(
         "https://github.com/{}/{}/commits?author={}".format(
             username, repo_name, username
-        )
+        ),
+        timeout=15
     ).text
     soup = BeautifulSoup(commit_data, "lxml")
     a_tags = soup.findAll("a")
@@ -86,8 +113,9 @@ def get_latest_commit_email(repo_name, username):
         if url and url.startswith("/{}/{}/commit/".format(username, repo_name)):
             label = str(a_tag.get("aria-label"))
             if "Merge" not in label and label != "None":
-                patch_data = requests.get(
-                    "https://github.com{}.patch".format(url)
+                patch_data = session.get(
+                    "https://github.com{}.patch".format(url),
+                    timeout=15
                 ).text
                 try:
                     start = patch_data.index("<")
@@ -100,8 +128,10 @@ def get_latest_commit_email(repo_name, username):
 
 
 def get_user_source_repos(username):
-    repo_data = requests.get(
-        "https://github.com/{}?tab=repositories&type=source".format(username)
+    session = get_authenticated_session()
+    repo_data = session.get(
+        "https://github.com/{}?tab=repositories&type=source".format(username),
+        timeout=15
     ).text
     repo_soup = BeautifulSoup(repo_data, "lxml")
     a_tags = repo_soup.findAll("a")
@@ -126,10 +156,14 @@ def get_user_profile(username):
         "stars": "0",
         "followers": "0",
         "following": "0",
+        "company": None,
+        "position": None,
+        "linkedin": None,
         "email": "Not enough information.",
     }
 
-    user_html = requests.get("https://github.com/" + username).text
+    session = get_authenticated_session()
+    user_html = session.get("https://github.com/" + username, timeout=15).text
     soup = BeautifulSoup(user_html, "lxml")
 
     repos = get_user_source_repos(username)
@@ -137,6 +171,48 @@ def get_user_profile(username):
 
     if len(repos) > 0:
         profile["email"] = get_latest_commit_email(repos[0], username)
+
+    # Extract company/organization
+    org_element = soup.find("span", {"class": "p-org"})
+    if org_element:
+        profile["company"] = org_element.get_text().strip()
+
+    # Also check for organization in the list items
+    org_li = soup.find("li", {"itemprop": "worksFor"})
+    if org_li:
+        org_text = org_li.get_text().strip()
+        if org_text and not profile["company"]:
+            profile["company"] = org_text
+
+    # Extract bio which often contains position/title
+    bio_element = soup.find("div", {"class": "p-note"})
+    if bio_element:
+        bio_text = bio_element.get_text().strip()
+        profile["position"] = bio_text
+
+    # Also check user-profile-bio
+    bio_div = soup.find("div", {"data-bio-text": True})
+    if bio_div:
+        bio_text = bio_div.get("data-bio-text", "").strip()
+        if bio_text:
+            profile["position"] = bio_text
+
+    # Extract LinkedIn from social links
+    social_links = soup.findAll("a", {"rel": "nofollow me"})
+    for link in social_links:
+        href = link.get("href", "")
+        if "linkedin.com" in href.lower():
+            profile["linkedin"] = href
+            break
+
+    # Also check all external links on profile
+    if not profile["linkedin"]:
+        all_links = soup.findAll("a", href=True)
+        for link in all_links:
+            href = link.get("href", "")
+            if "linkedin.com/in/" in href.lower():
+                profile["linkedin"] = href
+                break
 
     items = soup.findAll("a", {"class": "no-underline"})
     for item in items[1:]:
@@ -157,6 +233,22 @@ def get_user_profile(username):
                 profile["following"] = spans[0].get_text().strip()
 
     return profile
+
+
+def profile_qualifies(profile):
+    """Check if profile meets the required criteria."""
+    # Must have >20 repositories
+    if profile.get("repositories", 0) <= MIN_REPOSITORIES:
+        return False
+
+    # Must have company OR position listed
+    has_company = profile.get("company") and profile["company"].strip()
+    has_position = profile.get("position") and profile["position"].strip()
+
+    if not (has_company or has_position):
+        return False
+
+    return True
 
 
 def scrape_full(repo_url):

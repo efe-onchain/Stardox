@@ -57,6 +57,8 @@ def get_scrape_status(
         "total_usernames": job["total_usernames"],
         "usernames_scraped": job.get("usernames_scraped", 0),
         "profiles_scraped": job["profiles_scraped"],
+        "profiles_checked": job.get("profiles_checked", 0),
+        "profiles_qualified": job.get("profiles_qualified", 0),
         "error": job["error"],
         "offset": offset,
         "limit": limit,

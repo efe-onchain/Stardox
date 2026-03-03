@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from src.scraper import (
     format_url, verify_url, get_repo_title,
     get_stargazer_usernames, get_user_profile, get_user_email,
-    ScraperError,
+    profile_qualifies, ScraperError,
 )
 
 # In-memory job store
@@ -30,6 +30,8 @@ def create_job(repo_url, mode="full"):
         "total_usernames": 0,
         "usernames_scraped": 0,
         "profiles_scraped": 0,
+        "profiles_checked": 0,
+        "profiles_qualified": 0,
         "stargazers": [],
         "error": None,
         "created_at": time.time(),
@@ -59,6 +61,8 @@ def list_jobs():
                 "repo_name": j["repo_name"],
                 "total_usernames": j["total_usernames"],
                 "profiles_scraped": j["profiles_scraped"],
+                "profiles_checked": j.get("profiles_checked", 0),
+                "profiles_qualified": j.get("profiles_qualified", 0),
                 "created_at": j["created_at"],
             }
             for j in _jobs.values()
@@ -88,8 +92,9 @@ def _run_job(job_id):
         url = format_url(repo_url)
         _update_job(job_id, phase="fetching_repo")
 
-        import requests
-        html = requests.get(url, timeout=10).text
+        from src.scraper import get_authenticated_session
+        session = get_authenticated_session()
+        html = session.get(url, timeout=10).text
         if not verify_url(html):
             _update_job(job_id, status="failed", error="Invalid repository URL")
             return
@@ -128,16 +133,17 @@ def _email_only(username):
 
 def _scrape_usernames_with_progress(job_id, repo_url):
     """Scrape all stargazer usernames by iterating through page numbers."""
-    import requests
     from bs4 import BeautifulSoup
+    from src.scraper import get_authenticated_session
 
+    session = get_authenticated_session()
     usernames = []
     page = 1
     empty_streak = 0
 
     while True:
         url = repo_url + "/stargazers?page={}".format(page)
-        stargazer_html = requests.get(url, timeout=15).text
+        stargazer_html = session.get(url, timeout=15).text
         soup = BeautifulSoup(stargazer_html, "lxml")
 
         found = []
@@ -164,12 +170,17 @@ def _scrape_usernames_with_progress(job_id, repo_url):
     return usernames
 
 
-def _scrape_profiles_concurrent(job_id, usernames, scrape_fn):
+def _scrape_profiles_concurrent(job_id, usernames, scrape_fn, filter_profiles=True):
     """Scrape profiles using a thread pool, appending results in batches."""
     batch_size = WORKERS * 2
+    total_checked = 0
+    total_qualified = 0
+
     for i in range(0, len(usernames), batch_size):
         batch = usernames[i:i + batch_size]
         results = []
+        batch_checked = 0
+        batch_qualified = 0
 
         with ThreadPoolExecutor(max_workers=WORKERS) as pool:
             future_to_user = {pool.submit(scrape_fn, u): u for u in batch}
@@ -177,9 +188,20 @@ def _scrape_profiles_concurrent(job_id, usernames, scrape_fn):
                 username = future_to_user[future]
                 try:
                     result = future.result()
-                    results.append(result)
+                    batch_checked += 1
+                    # Only save profiles that meet criteria (company/position + >20 repos)
+                    if filter_profiles and scrape_fn == get_user_profile:
+                        if profile_qualifies(result):
+                            results.append(result)
+                            batch_qualified += 1
+                    else:
+                        results.append(result)
+                        batch_qualified += 1
                 except Exception:
-                    results.append({"username": username, "error": "Failed to scrape"})
+                    batch_checked += 1  # Count as checked even if failed
 
+        total_checked += batch_checked
+        total_qualified += batch_qualified
         _append_results(job_id, results)
+        _update_job(job_id, profiles_checked=total_checked, profiles_qualified=total_qualified)
         time.sleep(BATCH_DELAY)
